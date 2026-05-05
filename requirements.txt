@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+easyocr
+opencv-python
+pdf2image
+pillow
+transformers
+torch
+python-multipart
+python-dotenv
