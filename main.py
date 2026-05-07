@@ -71,6 +71,62 @@ async def health():
     return {"status": "ok", "version": "2.0.0"}
 
 
+@app.get("/diag")
+async def diag():
+    """Diagnostic: vérifie que tous les modules sont bien chargés."""
+    status = {}
+    
+    # Test arabic_utils
+    try:
+        from Services.arabic_utils import normalize_for_matching, build_flexible_pattern
+        status["arabic_utils"] = "OK"
+        status["normalize_test"] = normalize_for_matching("تجربة")
+        status["flex_test"] = build_flexible_pattern("وزارة")[:30] + "..."
+    except Exception as e:
+        status["arabic_utils"] = f"ERREUR: {e}"
+    
+    # Test rapidfuzz
+    try:
+        import rapidfuzz
+        status["rapidfuzz"] = f"OK (version: {rapidfuzz.__version__})"
+    except ImportError:
+        status["rapidfuzz"] = "NON INSTALLE - pip install rapidfuzz"
+    except Exception as e:
+        status["rapidfuzz"] = f"ERREUR: {e}"
+    
+    # Test regex
+    try:
+        import regex
+        status["regex"] = f"OK (version: {regex.__version__})"
+    except ImportError:
+        status["regex"] = "NON INSTALLE - pip install regex"
+    except Exception as e:
+        status["regex"] = f"ERREUR: {e}"
+    
+    # Test fuzzy_match
+    try:
+        from Services.fuzzy_match import ExtractionResult, fuzzy_find_keyword
+        status["fuzzy_match"] = "OK"
+    except Exception as e:
+        status["fuzzy_match"] = f"ERREUR: {e}"
+    
+    # Test postprocess
+    try:
+        from Services.postprocess import clean_output
+        status["postprocess"] = "OK"
+    except Exception as e:
+        status["postprocess"] = f"ERREUR: {e}"
+    
+    # Test nlp
+    try:
+        from Services.nlp import extract_entities
+        status["nlp"] = "OK"
+    except Exception as e:
+        status["nlp"] = f"ERREUR: {e}"
+    
+    return status
+
+
 @app.post("/extract")
 async def extract(file: UploadFile = File(...)):
     """

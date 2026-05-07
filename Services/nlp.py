@@ -3,11 +3,33 @@ Extraction d'entités pour documents arabes marocains
 - BERT CamelBERT NER avec découpage intelligent par tokens
 - Extraction hybride : NLP + règles (regex) pour les organisations
 - Filtrage par confiance
+- Normalisation arabe pour la déduplication (OCR-resilient)
 """
 import re
 import logging
 import time
 from transformers import pipeline, AutoTokenizer
+
+try:
+    from Services.arabic_utils import (
+        normalize_for_matching,
+        normalize_for_display,
+        build_flexible_pattern,
+        AR_RANGE,
+    )
+except ImportError as e:
+    logging.getLogger(__name__).warning(f"arabic_utils import failed: {e}")
+    # Fallbacks minimaux
+    AR_RANGE = r'\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF'
+    def normalize_for_matching(t): return t
+    def normalize_for_display(t): return t
+    def build_flexible_pattern(kw): return re.escape(kw)
+
+try:
+    from Services.fuzzy_match import deduplicate_by_similarity
+except ImportError as e:
+    logging.getLogger(__name__).warning(f"fuzzy_match import failed: {e}")
+    def deduplicate_by_similarity(items, threshold=0.85): return items
 
 logger = logging.getLogger(__name__)
 
@@ -20,44 +42,55 @@ OVERLAP_TOKENS = 50
 MIN_CONFIDENCE = 0.4
 
 # Classe de caractères arabes pour les regex
-_AR = r'\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF'
+_AR = AR_RANGE
 
 # Séparateurs qui terminent le nom d'une organisation
 # (ponctuation, retour à la ligne, certains mots-clés de coupure)
 _ORG_STOP = r'[.،:\n\r]'
 
-# Patterns regex pour les organisations marocaines
-# Chaque pattern utilise un groupe de capture limité qui s'arrête
-# à la ponctuation, fin de ligne ou après 6 mots arabes max.
-MOROCCAN_ORG_PATTERNS = [
-    # وزارة + suite (ex: وزارة التربية الوطنية)
-    rf'وزارة[\s\u200f]+((?:[{_AR}]+[\s\u200f]+){{1,5}}[{_AR}]+)',
-    # المديرية / مديرية + suite
-    rf'(?:المديرية|مديرية)[\s\u200f]+((?:[{_AR}]+[\s\u200f]+){{1,5}}[{_AR}]+)',
-    # مؤسسة / المؤسسة + suite
-    rf'(?:مؤسسة|المؤسسة)[\s\u200f]+((?:[{_AR}]+[\s\u200f]+){{1,5}}[{_AR}]+)',
-    # جامعة / الجامعة + suite
-    rf'(?:جامعة|الجامعة)[\s\u200f]+((?:[{_AR}]+[\s\u200f]+){{1,5}}[{_AR}]+)',
-    # وكالة / الوكالة + suite
-    rf'(?:وكالة|الوكالة)[\s\u200f]+((?:[{_AR}]+[\s\u200f]+){{1,5}}[{_AR}]+)',
-    # المكتب / مكتب + suite
-    rf'(?:المكتب|مكتب)[\s\u200f]+((?:[{_AR}]+[\s\u200f]+){{1,5}}[{_AR}]+)',
-    # اللجنة / لجنة + suite
-    rf'(?:اللجنة|لجنة)[\s\u200f]+((?:[{_AR}]+[\s\u200f]+){{1,5}}[{_AR}]+)',
-    # المحكمة / محكمة + suite
-    rf'(?:المحكمة|محكمة)[\s\u200f]+((?:[{_AR}]+[\s\u200f]+){{1,5}}[{_AR}]+)',
-    # جماعة / بلدية + suite
-    rf'(?:جماعة|الجماعة|بلدية)[\s\u200f]+((?:[{_AR}]+[\s\u200f]+){{1,5}}[{_AR}]+)',
-    # عمالة / إقليم / ولاية / جهة + suite
-    rf'(?:عمالة|إقليم|ولاية|جهة)[\s\u200f]+((?:[{_AR}]+[\s\u200f]+){{1,5}}[{_AR}]+)',
-    # بنك / صندوق + suite
-    rf'(?:بنك|البنك|صندوق|الصندوق)[\s\u200f]+((?:[{_AR}]+[\s\u200f]+){{1,5}}[{_AR}]+)',
-    # المجلس / مجلس + suite
-    rf'(?:المجلس|مجلس)[\s\u200f]+((?:[{_AR}]+[\s\u200f]+){{1,5}}[{_AR}]+)',
+# Prefixes d'organisations marocaines
+# On utilise build_flexible_pattern pour rendre chaque préfixe
+# tolérant aux erreurs OCR (أ→ا, ة→ه, ي→ى, etc.)
+_ORG_PREFIXES = [
+    'وزارة',
+    'المديرية', 'مديرية',
+    'مؤسسة', 'المؤسسة',
+    'جامعة', 'الجامعة',
+    'وكالة', 'الوكالة',
+    'المكتب', 'مكتب',
+    'اللجنة', 'لجنة',
+    'المحكمة', 'محكمة',
+    'جماعة', 'الجماعة', 'بلدية',
+    'عمالة', 'إقليم', 'ولاية', 'جهة',
+    'بنك', 'البنك', 'صندوق', 'الصندوق',
+    'المجلس', 'مجلس',
 ]
 
-# Pré-compiler les patterns pour de meilleures performances
-_COMPILED_ORG_PATTERNS = [re.compile(p, re.UNICODE) for p in MOROCCAN_ORG_PATTERNS]
+# Construire les patterns regex flexibles (tolérants OCR) pour chaque préfixe
+# Chaque préfixe est rendu flexible: وزارة → [وٶؤ]ز[اأإآ]ر[ةه]
+MOROCCAN_ORG_PATTERNS = []
+_COMPILED_ORG_PATTERNS = []
+try:
+    for prefix in _ORG_PREFIXES:
+        flex_prefix = build_flexible_pattern(prefix)
+        pattern = flex_prefix + r'[\s\u200f]+((?:[' + _AR + r']+[\s\u200f]+){1,5}[' + _AR + r']+)'
+        MOROCCAN_ORG_PATTERNS.append(pattern)
+    _COMPILED_ORG_PATTERNS = [re.compile(p, re.UNICODE) for p in MOROCCAN_ORG_PATTERNS]
+except Exception as e:
+    logging.getLogger(__name__).warning(f"Flexible ORG patterns failed, using basic: {e}")
+    # Fallback: patterns basiques sans flex
+    _basic_prefixes = [
+        'وزارة', 'المديرية', 'مديرية', 'مؤسسة', 'المؤسسة',
+        'جامعة', 'الجامعة', 'وكالة', 'الوكالة', 'المكتب', 'مكتب',
+        'اللجنة', 'لجنة', 'المحكمة', 'محكمة', 'جماعة', 'الجماعة', 'بلدية',
+        'عمالة', 'إقليم', 'ولاية', 'جهة', 'بنك', 'البنك',
+        'صندوق', 'الصندوق', 'المجلس', 'مجلس',
+    ]
+    MOROCCAN_ORG_PATTERNS = [
+        rf'(?:{re.escape(p)})[\s\u200f]+((?:[{_AR}]+[\s\u200f]+){{1,5}}[{_AR}]+)'
+        for p in _basic_prefixes
+    ]
+    _COMPILED_ORG_PATTERNS = [re.compile(p, re.UNICODE) for p in MOROCCAN_ORG_PATTERNS]
 
 
 def get_ner():
@@ -106,6 +139,8 @@ def _split_text_by_tokens(text):
 def _clean_bert_entity(word):
     cleaned = word.replace("##", "").strip()
     cleaned = re.sub(r'\s+', ' ', cleaned)
+    # Normaliser pour l'affichage (garder les taa marbuta etc.)
+    cleaned = normalize_for_display(cleaned)
     return cleaned
 
 
@@ -137,8 +172,8 @@ def _extract_with_bert(text):
 def _extract_with_regex(text):
     """
     Extrait les organisations via regex.
-    Chaque pattern capture le préfixe (وزارة, مديرية, etc.) + la suite,
-    limitée à 6 mots arabes max pour éviter les phrases trop longues.
+    Utilise des patterns OCR-flexibles pour chaque préfixe.
+    Chaque pattern capture le préfixe + la suite (max 6 mots arabes).
     """
     entities = []
     seen = set()
@@ -159,13 +194,14 @@ def _extract_with_regex(text):
             if len(arabic_words) < 2:
                 continue
 
-            # Dédupliquer à ce stade
-            if full_match in seen:
+            # Dédupliquer avec normalisation
+            norm_key = normalize_for_matching(full_match)
+            if norm_key in seen:
                 continue
-            seen.add(full_match)
+            seen.add(norm_key)
 
             entities.append({
-                "word": full_match,
+                "word": normalize_for_display(full_match),
                 "entity_group": "ORG",
                 "score": 0.75,
                 "source": "regex",
@@ -177,32 +213,42 @@ def _extract_with_regex(text):
 def _deduplicate_entities(entities):
     """
     Déduplique les entités en gardant celle avec le meilleur score.
+    Utilise le fuzzy matching pour fusionner les variantes OCR.
     Gère aussi les cas où une entité est un sous-texte d'une autre.
     """
     if not entities:
         return []
 
-    # D'abord, dédupliquer par texte exact (garder le meilleur score)
+    # D'abord, dédupliquer par texte normalisé (garder le meilleur score)
     seen = {}
     for ent in entities:
-        key = ent["word"]
+        key = normalize_for_matching(ent["word"])
         if key not in seen or ent["score"] > seen[key]["score"]:
             seen[key] = ent
 
-    # Ensuite, retirer les sous-chaînes (si "مديرية" est contenu dans
-    # "المديرية العامة للأمن" et les deux sont de type ORG, garder la plus longue)
+    # Ensuite, fusionner les variantes OCR proches (fuzzy dedup)
     result = list(seen.values())
+    
+    # Grouper par entity_group pour la déduplication fuzzy
+    grouped = {}
+    for ent in result:
+        eg = ent["entity_group"]
+        grouped.setdefault(eg, []).append(ent)
+    
     filtered = []
-    for ent in sorted(result, key=lambda e: len(e["word"]), reverse=True):
-        is_substring = False
-        for kept in filtered:
-            if (ent["entity_group"] == kept["entity_group"]
-                    and ent["word"] in kept["word"]
-                    and ent["word"] != kept["word"]):
-                is_substring = True
-                break
-        if not is_substring:
-            filtered.append(ent)
+    for eg, ents in grouped.items():
+        # Trier par longueur de mot (plus long d'abord)
+        ents_sorted = sorted(ents, key=lambda e: len(e["word"]), reverse=True)
+        
+        # Déduplication par similarité fuzzy
+        words = [e["word"] for e in ents_sorted]
+        unique_words = deduplicate_by_similarity(words, threshold=0.85)
+        unique_words_set = set(unique_words)
+        
+        for ent in ents_sorted:
+            if ent["word"] in unique_words_set:
+                filtered.append(ent)
+                unique_words_set.discard(ent["word"])
 
     return filtered
 

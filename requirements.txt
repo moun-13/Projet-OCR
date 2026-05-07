@@ -8,3 +8,6 @@ transformers
 torch
 python-multipart
 python-dotenv
+rapidfuzz
+regex
+pyarabic

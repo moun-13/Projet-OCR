@@ -6,13 +6,14 @@ Optimisations clés :
 - beamWidth=10 : explore plus de possibilités pour les mots arabes
 - paragraph=False : on gère l'ordre nous-mêmes (RTL)
 - Test sur 3 versions d'image, garde la meilleure
-- Nettoyage Unicode du texte arabe (normalisation, suppression artéfacts)
+- Nettoyage Unicode du texte arabe (normalisation via arabic_utils)
 """
 import re
-import unicodedata
 import easyocr
 import logging
 import time
+
+from Services.arabic_utils import normalize_for_display
 
 logger = logging.getLogger(__name__)
 
@@ -41,35 +42,9 @@ def get_reader():
 def _normalize_arabic(text: str) -> str:
     """
     Normalise le texte arabe pour corriger les erreurs OCR courantes.
+    Délègue à arabic_utils.normalize_for_display pour la logique centralisée.
     """
-    if not text:
-        return text
-
-    # Normalisation Unicode NFC (forme composée canonique)
-    text = unicodedata.normalize("NFC", text)
-
-    # Supprimer les caractères de contrôle invisibles sauf les espaces
-    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
-
-    # Normaliser les différentes formes de alef
-    text = text.replace('أ', 'أ')
-    text = text.replace('إ', 'إ')
-    text = text.replace('آ', 'آ')
-
-    # Supprimer les marques directionnelles Unicode (LRM, RLM, etc.)
-    # qui peuvent causer des problèmes d'affichage
-    text = re.sub(r'[\u200e\u200f\u202a-\u202e\u2066-\u2069]', '', text)
-
-    # Supprimer les diacritiques/tashkeel (حَرَكَات) car ils ne sont
-    # presque jamais présents dans les documents administratifs et
-    # l'OCR les ajoute souvent par erreur
-    TASHKEEL = re.compile(r'[\u0617-\u061A\u064B-\u0652\u0670]')
-    text = TASHKEEL.sub('', text)
-
-    # Supprimer les espaces multiples
-    text = re.sub(r'\s+', ' ', text)
-
-    return text.strip()
+    return normalize_for_display(text)
 
 
 def _clean_ocr_line(text: str) -> str:
