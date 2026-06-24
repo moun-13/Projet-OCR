@@ -8,7 +8,10 @@ Backend FastAPI pour le traitement de documents administratifs marocains
 import time
 import uuid
 import logging
+import hashlib
+import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +32,39 @@ logger = logging.getLogger(__name__)
 
 # Taille max du fichier (20 MB)
 MAX_FILE_SIZE = 20 * 1024 * 1024
+RESULTS_CACHE_DIR = Path(__file__).resolve().parent / "results_cache"
+CACHE_VERSION = "business-schema-v3"
+
+
+def _cache_path(file_hash: str) -> Path:
+    return RESULTS_CACHE_DIR / f"{file_hash}.json"
+
+
+def _load_cached_result(file_hash: str):
+    path = _cache_path(file_hash)
+    if not path.exists():
+        return None
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            cached = json.load(f)
+        if cached.get("_cache_version") != CACHE_VERSION:
+            return None
+        cached.pop("_cache_version", None)
+        return cached
+    except Exception as e:
+        logger.warning(f"Cache illisible ({path.name}): {e}")
+        return None
+
+
+def _save_cached_result(file_hash: str, result: dict):
+    RESULTS_CACHE_DIR.mkdir(exist_ok=True)
+    path = _cache_path(file_hash)
+    cache_payload = dict(result)
+    cache_payload["_cache_version"] = CACHE_VERSION
+
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(cache_payload, f, ensure_ascii=False, indent=2)
 
 
 @asynccontextmanager
@@ -163,6 +199,12 @@ async def extract(file: UploadFile = File(...)):
             detail=f"Fichier trop volumineux ({len(pdf_bytes) // 1024 // 1024} MB). Max: {MAX_FILE_SIZE // 1024 // 1024} MB"
         )
 
+    file_hash = hashlib.sha256(pdf_bytes).hexdigest()
+    cached_result = _load_cached_result(file_hash)
+    if cached_result:
+        logger.info(f"[{request_id}] Resultat deja enregistre, retour depuis le cache")
+        return cached_result
+
     logger.info(f"[{request_id}] Fichier valide: {len(pdf_bytes) // 1024} KB")
 
     try:
@@ -183,11 +225,17 @@ async def extract(file: UploadFile = File(...)):
 
         if not text.strip():
             logger.warning(f"[{request_id}] OCR n'a detecte aucun texte!")
-            return {
+            result = {
                 "warning": "Aucun texte detecte dans le document",
                 "raw_text": "",
                 "processing_time": round(time.time() - total_start, 1),
+                "pages": len(images),
+                "file_hash": file_hash,
+                "filename": file.filename,
+                "request_id": request_id,
             }
+            _save_cached_result(file_hash, result)
+            return result
 
         # 4. NLP (BERT arabe)
         t = time.time()
@@ -200,14 +248,14 @@ async def extract(file: UploadFile = File(...)):
         logger.info(f"[{request_id}] 5/5 Post-traitement en {time.time() - t:.1f}s")
 
         # Ajouter les metadonnees
-        result["processing_time"] = round(time.time() - total_start, 1)
-        result["pages"] = len(images)
+        processing_time = round(time.time() - total_start, 1)
 
         logger.info(
-            f"[{request_id}] === Termine en {result['processing_time']}s === "
-            f"Champs: {[k for k in result.keys() if k != 'raw_text']}"
+            f"[{request_id}] === Termine en {processing_time}s === "
+            f"Champs: {list(result.keys())}"
         )
 
+        _save_cached_result(file_hash, result)
         return result
 
     except ValueError as e:

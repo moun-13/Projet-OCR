@@ -46,9 +46,7 @@ from Services.arabic_utils import (
 logger = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════════════════════════════════
 # Data classes pour les résultats
-# ═══════════════════════════════════════════════════════════════════
 
 @dataclass
 class FuzzyMatch:
@@ -80,9 +78,7 @@ class ExtractionResult:
         )
 
 
-# ═══════════════════════════════════════════════════════════════════
 # Fuzzy keyword search
-# ═══════════════════════════════════════════════════════════════════
 
 def fuzzy_find_keyword(
     text: str,
@@ -209,9 +205,8 @@ def extract_value_after_keyword(
     return ""
 
 
-# ═══════════════════════════════════════════════════════════════════
 # Fuzzy keyword + value extraction combinée
-# ═══════════════════════════════════════════════════════════════════
+
 
 def fuzzy_extract_near_keyword(
     text: str,
@@ -247,9 +242,8 @@ def fuzzy_extract_near_keyword(
     )
 
 
-# ═══════════════════════════════════════════════════════════════════
+
 # Regex fuzzy avec le module `regex`
-# ═══════════════════════════════════════════════════════════════════
 
 def fuzzy_regex_search(
     pattern: str,
@@ -288,9 +282,9 @@ def fuzzy_regex_search(
             return re.search(pattern, text, flags)
 
 
-# ═══════════════════════════════════════════════════════════════════
+
 # Enum/label matching
-# ═══════════════════════════════════════════════════════════════════
+
 
 def match_enum_fuzzy(
     text: str,

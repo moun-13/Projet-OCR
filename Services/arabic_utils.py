@@ -15,9 +15,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# ═══════════════════════════════════════════════════════════════════
+
 # Tables de référence
-# ═══════════════════════════════════════════════════════════════════
+
 
 # Chiffres arabes orientaux → occidentaux
 ARABIC_DIGIT_MAP = {
@@ -89,9 +89,9 @@ ARABIC_MONTHS = {
 }
 
 
-# ═══════════════════════════════════════════════════════════════════
+
 # Fonctions de normalisation
-# ═══════════════════════════════════════════════════════════════════
+
 
 def remove_tashkeel(text: str) -> str:
     """Supprime les diacritiques (حركات) du texte arabe."""
@@ -172,9 +172,7 @@ def normalize_for_display(text: str) -> str:
     return text.strip()
 
 
-# ═══════════════════════════════════════════════════════════════════
 # Construction de regex flexibles
-# ═══════════════════════════════════════════════════════════════════
 
 def build_flexible_pattern(keyword: str) -> str:
     """

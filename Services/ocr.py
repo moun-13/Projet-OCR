@@ -35,9 +35,7 @@ def get_reader():
     return reader
 
 
-# =========================================================================
 # Nettoyage du texte arabe post-OCR
-# =========================================================================
 
 def _normalize_arabic(text: str) -> str:
     """
@@ -71,9 +69,7 @@ def _clean_ocr_line(text: str) -> str:
     return cleaned
 
 
-# =========================================================================
 # OCR principal
-# =========================================================================
 
 def _ocr_single_image(ocr_reader, image, min_confidence: float = 0.25) -> list:
     """
