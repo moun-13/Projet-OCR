@@ -54,11 +54,11 @@ def convert_pdf_to_images(pdf_bytes: bytes) -> list:
             images.append(np_img)
 
         logger.info(
-            f"📄 PDF converti: {len(images)} page(s) à {PDF_DPI} DPI "
+            f" PDF converti: {len(images)} page(s) à {PDF_DPI} DPI "
             f"en {time.time() - t:.1f}s"
         )
         return images
 
     except Exception as e:
-        logger.error(f"❌ Erreur conversion PDF: {e}")
+        logger.error(f" Erreur conversion PDF: {e}")
         raise ValueError(f"Impossible de convertir le PDF: {e}")

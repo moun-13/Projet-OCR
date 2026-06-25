@@ -10,6 +10,7 @@ import uuid
 import logging
 import hashlib
 import json
+from io import BytesIO
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from utils.pdf_to_image import convert_pdf_to_images
 from Services.preprocess import preprocess
-from Services.ocr import run_ocr, get_reader
+from Services.ocr import run_ocr, get_reader, get_ocr_engine_name
 from Services.nlp import extract_entities, get_ner
 from Services.postprocess import clean_output
 
@@ -33,7 +34,8 @@ logger = logging.getLogger(__name__)
 # Taille max du fichier (20 MB)
 MAX_FILE_SIZE = 20 * 1024 * 1024
 RESULTS_CACHE_DIR = Path(__file__).resolve().parent / "results_cache"
-CACHE_VERSION = "business-schema-v3"
+CACHE_VERSION = "business-schema-v7"
+SUPPORTED_EXTENSIONS = {".pdf", ".docx"}
 
 
 def _cache_path(file_hash: str) -> Path:
@@ -51,6 +53,7 @@ def _load_cached_result(file_hash: str):
         if cached.get("_cache_version") != CACHE_VERSION:
             return None
         cached.pop("_cache_version", None)
+        cached.pop("_source_type", None)
         return cached
     except Exception as e:
         logger.warning(f"Cache illisible ({path.name}): {e}")
@@ -65,6 +68,33 @@ def _save_cached_result(file_hash: str, result: dict):
 
     with path.open("w", encoding="utf-8") as f:
         json.dump(cache_payload, f, ensure_ascii=False, indent=2)
+
+
+def _extract_docx_text(docx_bytes: bytes) -> str:
+    try:
+        from docx import Document
+    except ImportError as e:
+        raise RuntimeError("python-docx est requis pour lire les fichiers DOCX") from e
+
+    document = Document(BytesIO(docx_bytes))
+    chunks = []
+
+    for paragraph in document.paragraphs:
+        text = paragraph.text.strip()
+        if text:
+            chunks.append(text)
+
+    for table in document.tables:
+        for row in table.rows:
+            cells = [
+                cell.text.strip().replace("\n", " ")
+                for cell in row.cells
+                if cell.text.strip()
+            ]
+            if cells:
+                chunks.append(" | ".join(cells))
+
+    return "\n".join(chunks)
 
 
 @asynccontextmanager
@@ -110,7 +140,7 @@ async def health():
 @app.get("/diag")
 async def diag():
     """Diagnostic: vérifie que tous les modules sont bien chargés."""
-    status = {}
+    status = {"ocr_engine": get_ocr_engine_name()}
     
     # Test arabic_utils
     try:
@@ -178,10 +208,14 @@ async def extract(file: UploadFile = File(...)):
     if not file.filename:
         raise HTTPException(status_code=400, detail="Nom de fichier manquant")
 
-    if not file.filename.lower().endswith(".pdf"):
+    file_extension = Path(file.filename).suffix.lower()
+    if file_extension not in SUPPORTED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
-            detail=f"Format non supporte: {file.filename}. Seuls les PDF sont acceptes."
+            detail=(
+                f"Format non supporte: {file.filename}. "
+                "Formats acceptes: PDF, DOCX."
+            )
         )
 
     try:
@@ -208,31 +242,30 @@ async def extract(file: UploadFile = File(...)):
     logger.info(f"[{request_id}] Fichier valide: {len(pdf_bytes) // 1024} KB")
 
     try:
-        # 1. PDF → Images
-        t = time.time()
-        images = convert_pdf_to_images(pdf_bytes)
-        logger.info(f"[{request_id}] 1/5 PDF -> {len(images)} images en {time.time() - t:.1f}s")
+        if file_extension == ".pdf":
+            t = time.time()
+            images = convert_pdf_to_images(pdf_bytes)
+            logger.info(f"[{request_id}] 1/5 PDF -> {len(images)} images en {time.time() - t:.1f}s")
 
-        # 2. Pretraitement
-        t = time.time()
-        processed_images = [preprocess(img) for img in images]
-        logger.info(f"[{request_id}] 2/5 Pretraitement en {time.time() - t:.1f}s")
+            t = time.time()
+            processed_images = [preprocess(img) for img in images]
+            logger.info(f"[{request_id}] 2/5 Pretraitement en {time.time() - t:.1f}s")
 
-        # 3. OCR
-        t = time.time()
-        text = run_ocr(processed_images)
-        logger.info(f"[{request_id}] 3/5 OCR en {time.time() - t:.1f}s — {len(text)} caracteres")
+            t = time.time()
+            text = run_ocr(processed_images)
+            logger.info(f"[{request_id}] 3/5 OCR en {time.time() - t:.1f}s - {len(text)} caracteres")
+            source_type = "pdf_ocr"
+        else:
+            t = time.time()
+            text = _extract_docx_text(pdf_bytes)
+            logger.info(f"[{request_id}] 1/3 DOCX -> texte en {time.time() - t:.1f}s - {len(text)} caracteres")
+            source_type = "docx_text"
 
         if not text.strip():
-            logger.warning(f"[{request_id}] OCR n'a detecte aucun texte!")
+            logger.warning(f"[{request_id}] Aucun texte detecte!")
             result = {
                 "warning": "Aucun texte detecte dans le document",
-                "raw_text": "",
-                "processing_time": round(time.time() - total_start, 1),
-                "pages": len(images),
-                "file_hash": file_hash,
-                "filename": file.filename,
-                "request_id": request_id,
+                "source_type": source_type,
             }
             _save_cached_result(file_hash, result)
             return result
@@ -255,7 +288,9 @@ async def extract(file: UploadFile = File(...)):
             f"Champs: {list(result.keys())}"
         )
 
-        _save_cached_result(file_hash, result)
+        cache_result = dict(result)
+        cache_result["_source_type"] = source_type
+        _save_cached_result(file_hash, cache_result)
         return result
 
     except ValueError as e:

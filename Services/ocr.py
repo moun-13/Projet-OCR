@@ -9,21 +9,41 @@ Optimisations clés :
 - Nettoyage Unicode du texte arabe (normalisation via arabic_utils)
 """
 import re
-import easyocr
 import logging
 import time
+import os
 
 from Services.arabic_utils import normalize_for_display
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 logger = logging.getLogger(__name__)
 
 reader = None
+paddle_reader = None
+
+
+def get_ocr_engine_name() -> str:
+    """Retourne le moteur OCR demandé via OCR_ENGINE."""
+    return os.getenv("OCR_ENGINE", "easyocr").strip().lower()
 
 
 def get_reader():
     """Charge le modèle EasyOCR une seule fois (arabe + anglais)."""
     global reader
     if reader is None:
+        try:
+            import easyocr
+        except ImportError as e:
+            raise RuntimeError(
+                "EasyOCR n'est pas installe. Installer easyocr "
+                "ou utiliser OCR_ENGINE=paddle avec PaddleOCR installe."
+            ) from e
+
         logger.info("Chargement EasyOCR (ar + en)...")
         t = time.time()
         reader = easyocr.Reader(
@@ -33,6 +53,33 @@ def get_reader():
         )
         logger.info(f"EasyOCR charge en {time.time() - t:.1f}s")
     return reader
+
+
+def get_paddle_reader():
+    """
+    Charge PaddleOCR si disponible.
+    Installation optionnelle:
+        pip install paddleocr paddlepaddle
+    """
+    global paddle_reader
+    if paddle_reader is None:
+        try:
+            from paddleocr import PaddleOCR
+        except ImportError as e:
+            raise RuntimeError(
+                "PaddleOCR n'est pas installe. Installer paddleocr/paddlepaddle "
+                "ou utiliser OCR_ENGINE=easyocr."
+            ) from e
+
+        logger.info("Chargement PaddleOCR (ar + latin)...")
+        t = time.time()
+        paddle_reader = PaddleOCR(
+            lang="arabic",
+            use_angle_cls=True,
+            show_log=False,
+        )
+        logger.info(f"PaddleOCR charge en {time.time() - t:.1f}s")
+    return paddle_reader
 
 
 # Nettoyage du texte arabe post-OCR
@@ -115,7 +162,51 @@ def _ocr_single_image(ocr_reader, image, min_confidence: float = 0.25) -> list:
         return []
 
 
-def _run_ocr_on_image(ocr_reader, preprocessed: dict, page_num: int) -> str:
+def _flatten_paddle_results(results) -> list:
+    """Gere les variantes de format retournees par PaddleOCR."""
+    if not results:
+        return []
+
+    # PaddleOCR recent: [ [ [bbox, (text, score)], ... ] ]
+    if len(results) == 1 and isinstance(results[0], list):
+        first = results[0]
+        if not first:
+            return []
+        if isinstance(first[0], list) and len(first[0]) >= 2:
+            return first
+
+    # Format plus ancien: [ [bbox, (text, score)], ... ]
+    return results
+
+
+def _ocr_single_image_paddle(paddle_ocr, image, min_confidence: float = 0.25) -> list:
+    """Execute PaddleOCR sur une image."""
+    try:
+        raw_results = paddle_ocr.ocr(image, cls=True)
+        filtered = []
+
+        for item in _flatten_paddle_results(raw_results):
+            if not item or len(item) < 2:
+                continue
+            payload = item[1]
+            if not isinstance(payload, (tuple, list)) or len(payload) < 2:
+                continue
+
+            text, confidence = payload[0], float(payload[1])
+            cleaned = _clean_ocr_line(str(text))
+            if confidence >= min_confidence and cleaned:
+                normalized = _normalize_arabic(cleaned)
+                if normalized:
+                    filtered.append((normalized, confidence))
+
+        return filtered
+
+    except Exception as e:
+        logger.error(f"Erreur PaddleOCR sur image: {e}")
+        return []
+
+
+def _run_ocr_on_image(ocr_reader, preprocessed: dict, page_num: int, engine: str) -> str:
     """
     Exécute l'OCR sur toutes les versions d'une image prétraitée.
     Compare les résultats et garde la version avec le meilleur score.
@@ -127,7 +218,10 @@ def _run_ocr_on_image(ocr_reader, preprocessed: dict, page_num: int) -> str:
     results = {}
 
     for version_name, image in preprocessed.items():
-        ocr_results = _ocr_single_image(ocr_reader, image)
+        if engine == "paddle":
+            ocr_results = _ocr_single_image_paddle(ocr_reader, image)
+        else:
+            ocr_results = _ocr_single_image(ocr_reader, image)
         if ocr_results:
             avg_conf = sum(c for _, c in ocr_results) / len(ocr_results)
             total_text = " ".join(t for t, _ in ocr_results)
@@ -177,12 +271,27 @@ def run_ocr(preprocessed_images: list) -> str:
     """
     Exécute l'OCR sur toutes les images et retourne le texte complet.
     """
-    ocr_reader = get_reader()
+    engine = get_ocr_engine_name()
+    if engine == "paddle":
+        try:
+            ocr_reader = get_paddle_reader()
+        except RuntimeError as e:
+            logger.warning(f"{e} Retour a EasyOCR.")
+            engine = "easyocr"
+            ocr_reader = get_reader()
+    else:
+        engine = "easyocr"
+        ocr_reader = get_reader()
     all_text = []
 
     t = time.time()
     for i, preprocessed in enumerate(preprocessed_images):
-        page_text = _run_ocr_on_image(ocr_reader, preprocessed, page_num=i + 1)
+        page_text = _run_ocr_on_image(
+            ocr_reader,
+            preprocessed,
+            page_num=i + 1,
+            engine=engine,
+        )
         if page_text:
             all_text.append(page_text)
 
@@ -192,7 +301,7 @@ def run_ocr(preprocessed_images: list) -> str:
     full_text = _normalize_arabic(full_text)
 
     logger.info(
-        f"OCR termine: {len(all_text)} page(s), "
+        f"OCR termine ({engine}): {len(all_text)} page(s), "
         f"{len(full_text)} caracteres en {time.time() - t:.1f}s"
     )
 
