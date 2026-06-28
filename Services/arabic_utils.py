@@ -227,6 +227,36 @@ def build_flexible_keywords(keywords: list[str]) -> str:
     return '(?:' + '|'.join(patterns) + ')'
 
 
+def correct_reversed_number(val: str) -> str:
+    """
+    Corrige les nombres écrits à l'envers par l'OCR en raison de l'ordre de lecture RTL.
+    Exemple: "00000 000 15" -> "15 000 00000"
+    """
+    if not val:
+        return ""
+    digits_groups = re.findall(r'\d+', val)
+    if len(digits_groups) >= 2:
+        parts = re.split(r'\d+', val)
+        separators = parts[1:-1]
+        # Ne s'applique que si tous les séparateurs entre chiffres sont des espaces, virgules ou points (pas de lettres de dates)
+        if all(re.match(r'^[\s,.]*$', sep) for sep in separators):
+            first_group = digits_groups[0]
+            last_group = digits_groups[-1]
+            # Si le premier bloc commence par 0 (typiquement des zéros) et le dernier bloc n'est pas nul, c'est inversé
+            if first_group.startswith('0') and len(first_group) >= 2 and not all(c == '0' for c in last_group):
+                reversed_groups = list(reversed(digits_groups))
+                matches = list(re.finditer(r'\d+', val))
+                reconstructed = []
+                last_pos = 0
+                for i, match in enumerate(matches):
+                    reconstructed.append(val[last_pos:match.start()])
+                    reconstructed.append(reversed_groups[i])
+                    last_pos = match.end()
+                reconstructed.append(val[last_pos:])
+                return "".join(reconstructed)
+    return val
+
+
 def clean_extracted_value(val: str) -> str:
     """Nettoie une valeur extraite: supprime ponctuation de début/fin, espaces."""
     if not val:
@@ -234,4 +264,5 @@ def clean_extracted_value(val: str) -> str:
     val = val.strip()
     val = re.sub(r'[\s\u200f]+', ' ', val)
     val = re.sub(r'^[:\s،.؛\-ـ]+|[:\s،.؛\-ـ]+$', '', val)
-    return val.strip()
+    cleaned = val.strip()
+    return correct_reversed_number(cleaned)
